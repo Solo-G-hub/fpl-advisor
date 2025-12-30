@@ -24,27 +24,41 @@ def sync_prices_to_sheets(team_id, current_gw):
     """Fetches live team and overwrites the Google Sheet."""
     base_url = "https://fantasy.premierleague.com/api/"
     try:
+        # 1. Fetch static data for name mapping
         static = requests.get(f"{base_url}bootstrap-static/").json()
-        players_lookup = pd.DataFrame(static["elements"])[['id', 'web_name']]
+        players_lookup = {p['id']: p['web_name'] for p in static["elements"]}
         
+        # 2. Fetch specific team picks
         r = requests.get(f"{base_url}entry/{team_id}/event/{current_gw}/picks/")
         if r.status_code != 200:
              r = requests.get(f"{base_url}entry/{team_id}/event/{current_gw-1}/picks/")
 
         if r.status_code == 200:
-            picks = r.json()['picks']
-            # Create the DataFrame with the exact column names the app expects
-            new_data = pd.DataFrame([
-                {"web_name": players_lookup[players_lookup['id'] == p['element']]['web_name'].values[0], 
-                 "purchase_price": p['purchase_price'] / 10} 
-                for p in picks
-            ])
+            picks_list = r.json().get('picks', [])
+            
+            # 3. Carefully build the list of dictionaries to avoid KeyErrors
+            rows = []
+            for p in picks_list:
+                p_id = p.get('element')
+                # Use .get() and default values to prevent crashes if a key is missing
+                name = players_lookup.get(p_id, "Unknown")
+                price = p.get('purchase_price', 0) / 10.0
+                rows.append({"web_name": name, "purchase_price": price})
+            
+            if not rows:
+                st.error("No player data found to sync.")
+                return
+
+            new_data = pd.DataFrame(rows)
+            
+            # 4. Update the Google Sheet
             conn.update(worksheet="Prices", data=new_data)
+            
             st.cache_data.clear()
             st.success("✅ Google Sheet updated! Refreshing...")
             st.rerun()
         else:
-            st.error("❌ Sync failed. Team ID might be wrong or deadline hasn't passed.")
+            st.error(f"❌ Sync failed. FPL API returned status: {r.status_code}")
     except Exception as e:
         st.error(f"Sync Error: {e}")
 
@@ -103,6 +117,7 @@ def get_fpl_data(t_id, gw, horizon):
         try:
             df_gsheet = conn.read(worksheet="Prices", ttl=0)
             if not df_gsheet.empty and 'web_name' in df_gsheet.columns:
+                # Fixed: ensure keys are string before strip/lower
                 price_map = {str(row['web_name']).strip().lower(): row['purchase_price'] for _, row in df_gsheet.iterrows() if 'purchase_price' in row}
         except:
             pass
