@@ -113,7 +113,6 @@ def get_fpl_data(t_id, gw, horizon):
         current_gw_api = int(events[events["is_current"]].iloc[0]["id"]) if not events[events["is_current"]].empty else gw
         gw_fetch = min(int(gw)-1, current_gw_api)
 
-        # --- REFRESHED CHIP LOGIC (GW20+) ---
         history = requests.get(f"{base_url}entry/{t_id}/history/").json()
         used_chips = [c['name'] for c in history.get('chips', []) if c['event'] >= 20]
 
@@ -153,8 +152,16 @@ def get_fpl_data(t_id, gw, horizon):
         players["avg_fdr"] = players["team"].apply(lambda x: get_fdr(x, gw, horizon))
         players["base_xp"] = pd.to_numeric(players["ep_next"], errors="coerce").fillna(0)
         
-        # Scale XP by fixture count for the target week
-        players["xp"] = players["base_xp"] * (1 + (3 - players["avg_fdr"]) * 0.1 * fdr_weight) * players["gw_fixtures"]
+        # --- CALIBRATED XP CALCULATION ---
+        # Instead of multiplying by fixture count (which double counts), we use fixture count to apply 
+        # a modest 'floor/ceiling' bonus for DGWs (1.2x) while keeping ep_next as the primary driver.
+        def calibrate_xp(row):
+            fdr_mod = (1 + (3 - row["avg_fdr"]) * 0.1 * fdr_weight)
+            # 1.0 for SGW, 1.2 for DGW (prevents aggressive over-favoring)
+            dgw_mod = 1.0 if row["gw_fixtures"] <= 1 else 1.2 
+            return row["base_xp"] * fdr_mod * dgw_mod
+
+        players["xp"] = players.apply(calibrate_xp, axis=1)
         players["pos_name"] = players["element_type"].map({1:"GKP",2:"DEF",3:"MID",4:"FWD"})
         
         return players[players["status"].isin(["a","d"])], owned_ids, bank, used_chips
@@ -171,7 +178,6 @@ def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available):
     bench_score = pulp.lpSum([players.loc[i, 'xp'] * (s[i] - lineup[i]) for i in players.index]) * 0.15
     
     loyalty = 0.0 if is_wc else 0.5
-    # FIX: Corrected loyalty logic to use s[i] as a decision variable coefficient
     loyalty_score = pulp.lpSum([loyalty * s[i] for i in players.index if players.loc[i, 'id'] in owned_ids])
     
     prob += starters_score + bench_score + loyalty_score
@@ -305,15 +311,6 @@ if players is not None:
             st.table(res_sq[['Status', 'pos_name', 'team_name', 'web_name', 'xp']])
 
     with tab2:
-        st.subheader("🃏 Chip Strategy Advisor")
-        c_chips = st.columns(4)
-        chip_names = {"wildcard": "Wildcard", "freehit": "Free Hit", "3xc": "Triple Captain", "bboost": "Bench Boost"}
-        for i, (internal_name, display_name) in enumerate(chip_names.items()):
-            is_used = internal_name in used_chips
-            status = "❌ Used" if is_used else "✅ Available"
-            c_chips[i].metric(display_name, status)
-
-        st.divider()
         st.subheader("💡 Second Half Tactical Radar")
         
         # Double Gameweek Logic
@@ -343,11 +340,5 @@ if players is not None:
         st.dataframe(df_view[['web_name','team_name','pos_name','purchase_price','current_price','selling_price','xp','gw_fixtures','avg_fdr']]
                      .style.background_gradient(subset=['avg_fdr'], cmap='RdYlGn_r')
                      .format({'xp':'{:.2f}', 'selling_price':'£{:.1f}m', 'current_price':'£{:.1f}m', 'purchase_price':'£{:.1f}m'}), use_container_width=True)
-        
-        st.divider()
-        m_val, m_rem = st.columns(2)
-        m_val.metric("Squad Sell Value", f"£{current_sell_value:.1f}m")
-        m_rem.metric("Remaining Bank", f"£{current_bank:.2f}m")
-
 else:
     st.warning("Please enter your Team ID in the sidebar to begin.")
