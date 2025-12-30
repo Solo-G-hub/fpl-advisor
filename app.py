@@ -152,12 +152,8 @@ def get_fpl_data(t_id, gw, horizon):
         players["avg_fdr"] = players["team"].apply(lambda x: get_fdr(x, gw, horizon))
         players["base_xp"] = pd.to_numeric(players["ep_next"], errors="coerce").fillna(0)
         
-        # --- CALIBRATED XP CALCULATION ---
-        # Instead of multiplying by fixture count (which double counts), we use fixture count to apply 
-        # a modest 'floor/ceiling' bonus for DGWs (1.2x) while keeping ep_next as the primary driver.
         def calibrate_xp(row):
             fdr_mod = (1 + (3 - row["avg_fdr"]) * 0.1 * fdr_weight)
-            # 1.0 for SGW, 1.2 for DGW (prevents aggressive over-favoring)
             dgw_mod = 1.0 if row["gw_fixtures"] <= 1 else 1.2 
             return row["base_xp"] * fdr_mod * dgw_mod
 
@@ -311,19 +307,25 @@ if players is not None:
             st.table(res_sq[['Status', 'pos_name', 'team_name', 'web_name', 'xp']])
 
     with tab2:
+        st.subheader("🃏 Chip Strategy Advisor")
+        c_chips = st.columns(4)
+        chip_names = {"wildcard": "Wildcard", "freehit": "Free Hit", "3xc": "Triple Captain", "bboost": "Bench Boost"}
+        for i, (internal_name, display_name) in enumerate(chip_names.items()):
+            is_used = internal_name in used_chips
+            status = "❌ Used" if is_used else "✅ Available"
+            c_chips[i].metric(display_name, status)
+
+        st.divider()
         st.subheader("💡 Second Half Tactical Radar")
         
-        # Double Gameweek Logic
         dgw_players = current_df[current_df['gw_fixtures'] >= 2]
         if not dgw_players.empty and 'bboost' not in used_chips:
             st.success(f"🚀 **Bench Boost Potential:** You have {len(dgw_players)} players playing twice this week!")
         
-        # Triple Captain Logic
         top_p = current_df.nlargest(1, 'xp').iloc[0]
         if top_p['gw_fixtures'] >= 2 and '3xc' not in used_chips:
             st.info(f"👑 **Triple Captain Alert:** {top_p['web_name']} has a Double Gameweek. High ceiling detected.")
 
-        # Blank Gameweek Logic
         blanks = current_df[current_df['gw_fixtures'] == 0]
         if len(blanks) >= 3 and 'freehit' not in used_chips:
             st.error(f"🃏 **Free Hit Advice:** {len(blanks)} players have NO fixture. Consider a Free Hit.")
@@ -340,5 +342,12 @@ if players is not None:
         st.dataframe(df_view[['web_name','team_name','pos_name','purchase_price','current_price','selling_price','xp','gw_fixtures','avg_fdr']]
                      .style.background_gradient(subset=['avg_fdr'], cmap='RdYlGn_r')
                      .format({'xp':'{:.2f}', 'selling_price':'£{:.1f}m', 'current_price':'£{:.1f}m', 'purchase_price':'£{:.1f}m'}), use_container_width=True)
+        
+        # --- RESTORED FINANCIAL METRICS ---
+        st.divider()
+        m_val, m_rem = st.columns(2)
+        m_val.metric("Squad Sell Value", f"£{current_sell_value:.1f}m")
+        m_rem.metric("Remaining Bank", f"£{current_bank:.2f}m")
+
 else:
     st.warning("Please enter your Team ID in the sidebar to begin.")
