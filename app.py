@@ -187,16 +187,39 @@ def get_fpl_data(t_id, gw, horizon, att_decay, def_decay):
 
 def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available):
     prob = pulp.LpProblem("FPL_Optimization", pulp.LpMaximize)
+    
+    # --- VARIABLES ---
     s = pulp.LpVariable.dicts("squad", players.index, cat=pulp.LpBinary)  
     lineup = pulp.LpVariable.dicts("lineup", players.index, cat=pulp.LpBinary)  
+    captain = pulp.LpVariable.dicts("captain", players.index, cat=pulp.LpBinary) 
+    transfer_in = pulp.LpVariable.dicts("tr_in", players.index, cat=pulp.LpBinary)
     
+    # --- OBJECTIVE FUNCTION ---
     starters_score = pulp.lpSum([players.loc[i, 'xp'] * lineup[i] for i in players.index])
+    captain_bonus = pulp.lpSum([players.loc[i, 'xp'] * captain[i] for i in players.index])
     bench_score = pulp.lpSum([players.loc[i, 'xp'] * (s[i] - lineup[i]) for i in players.index]) * 0.15
     
-    loyalty = 0.0 if is_wc else 0.5
-    loyalty_score = pulp.lpSum([loyalty * s[i] for i in players.index if players.loc[i, 'id'] in owned_ids])
+    if is_wc:
+        transfer_penalty = 0
+        loyalty_score = 0
+    else:
+        for i in players.index:
+            if players.loc[i, 'id'] in owned_ids:
+                prob += transfer_in[i] == 0
+            else:
+                prob += transfer_in[i] >= s[i]
+        
+        total_transfers = pulp.lpSum([transfer_in[i] for i in players.index])
+        num_hits = pulp.LpVariable("num_hits", lowBound=0, cat=pulp.LpInteger)
+        prob += num_hits >= total_transfers - ft_available
+        
+        transfer_penalty = num_hits * 4.0
+        loyalty = 0.5
+        loyalty_score = pulp.lpSum([loyalty * s[i] for i in players.index if players.loc[i, 'id'] in owned_ids])
     
-    prob += starters_score + bench_score + loyalty_score
+    prob += starters_score + captain_bonus + bench_score + loyalty_score - transfer_penalty
+
+    # --- CONSTRAINTS ---
     prob += pulp.lpSum([s[i] for i in players.index]) == 15
     prob += pulp.lpSum([players.loc[i, 'cost'] * s[i] for i in players.index]) <= budget
     
@@ -206,29 +229,36 @@ def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available):
     for t in players.team_name.unique():
         prob += pulp.lpSum([s[i] for i in players.index if players.loc[i, 'team_name'] == t]) <= 3
         
-    if not is_wc:
-        total_transfers = ft_available + (1 if allow_hit else 0)
-        limit = 15 - total_transfers
-        prob += pulp.lpSum([s[i] for i in players.index if players.loc[i,'id'] in owned_ids]) >= limit
-
     prob += pulp.lpSum([lineup[i] for i in players.index]) == 11
+    prob += pulp.lpSum([captain[i] for i in players.index]) == 1 
+    
     for i in players.index: 
-        prob += lineup[i] <= s[i]  
+        prob += lineup[i] <= s[i] 
+        prob += captain[i] <= lineup[i] 
     
     prob += pulp.lpSum([lineup[i] for i in players.index if players.loc[i, 'element_type'] == 1]) == 1
     prob += pulp.lpSum([lineup[i] for i in players.index if players.loc[i, 'element_type'] == 2]) >= 3
     prob += pulp.lpSum([lineup[i] for i in players.index if players.loc[i, 'element_type'] == 4]) >= 1
     
+    if not is_wc:
+        max_allowed = ft_available + (5 if allow_hit else 0)
+        prob += pulp.lpSum([transfer_in[i] for i in players.index]) <= max_allowed
+
     prob.solve(pulp.PULP_CBC_CMD(msg=0))
     
     res = players.loc[[i for i in players.index if s[i].varValue == 1]].copy()
-    res['Status'] = ["⚽ START" if lineup[i].varValue == 1 else "🪑 BENCH" for i in res.index]
+    cap_id = [i for i in players.index if captain[i].varValue == 1][0]
+    cap_name = players.loc[cap_id, 'web_name']
     
-    starters_df = res[res['Status'] == "⚽ START"].sort_values(by='xp', ascending=False)
-    cap_name = starters_df.iloc[0]['web_name']
-    vc_name = starters_df.iloc[1]['web_name']
+    starters_ids = [i for i in players.index if lineup[i].varValue == 1]
+    vc_options = res[res.index.isin(starters_ids) & (res.index != cap_id)]
+    vc_name = vc_options.sort_values(by='xp', ascending=False).iloc[0]['web_name']
+    
+    res['Status'] = ["⚽ START" if lineup[i].varValue == 1 else "🪑 BENCH" for i in res.index]
+    res.loc[cap_id, 'Status'] = "👑 CAPTAIN"
     
     res['sort_rank'] = 0
+    res.loc[res['Status'] == "👑 CAPTAIN", 'sort_rank'] = -1
     res.loc[(res['Status'] == "🪑 BENCH") & (res['element_type'] == 1), 'sort_rank'] = 1
     res.loc[(res['Status'] == "🪑 BENCH") & (res['element_type'] != 1), 'sort_rank'] = 2
     res = res.sort_values(by=['sort_rank', 'xp'], ascending=[True, False])
@@ -236,7 +266,6 @@ def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available):
     return res, cap_name, vc_name
 
 # --- MAIN APP ---
-# Pass new decay sliders into data fetcher
 players, owned_ids, live_bank, used_chips = get_fpl_data(team_id, current_gw, horizon, att_decay, def_decay)
 
 if players is not None:
@@ -310,7 +339,6 @@ if players is not None:
                     for _, p in in_players.iterrows():
                         st.success(f"IN: {p['web_name']} ({p['team_name']})")
                 
-                # Check gain based on horizon-weighted XP
                 current_top_11_xp = players[players['id'].isin(owned_ids)].nlargest(11, 'xp')['xp'].sum()
                 new_top_11_xp = res_sq[res_sq['Status'].str.contains("⚽|👑")]['xp'].sum()
                 net_gain = new_top_11_xp - current_top_11_xp
@@ -323,9 +351,7 @@ if players is not None:
                 st.info("✅ Your current squad is mathematically optimal. No transfers needed!")
             
             st.divider()
-            st.success(f"Total Horizon XP: {res_sq[res_sq['Status'] == '⚽ START']['xp'].sum():.1f} | Captain: {cap}")
-            res_sq.loc[res_sq['web_name'] == cap, 'Status'] = "👑 CAPTAIN"
-            res_sq.loc[res_sq['web_name'] == vc, 'Status'] = "🥈 VICE-CAP"
+            st.success(f"Total Horizon XP: {res_sq[res_sq['Status'].str.contains('⚽|👑')]['xp'].sum():.1f} | Captain: {cap}")
             st.table(res_sq[['Status', 'pos_name', 'team_name', 'web_name', 'xp']])
 
     with tab2:
