@@ -192,7 +192,8 @@ def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available):
     s = pulp.LpVariable.dicts("squad", players.index, cat=pulp.LpBinary)  
     lineup = pulp.LpVariable.dicts("lineup", players.index, cat=pulp.LpBinary)  
     captain = pulp.LpVariable.dicts("captain", players.index, cat=pulp.LpBinary) 
-    transfer_in = pulp.LpVariable.dicts("tr_in", players.index, cat=pulp.LpBinary)
+    # Logic Fix: Single transfer variable to track both buys and sells
+    transfer = pulp.LpVariable.dicts("transfer", players.index, cat=pulp.LpBinary)
     
     # --- OBJECTIVE FUNCTION ---
     starters_score = pulp.lpSum([players.loc[i, 'xp'] * lineup[i] for i in players.index])
@@ -203,13 +204,18 @@ def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available):
         transfer_penalty = 0
         loyalty_score = 0
     else:
+        # ✅ Corrected Transfer Logic
         for i in players.index:
             if players.loc[i, 'id'] in owned_ids:
-                prob += transfer_in[i] == 0
+                # If owned but not in squad (s[i]=0), transfer[i] must be 1 (SELL)
+                prob += transfer[i] >= 1 - s[i]
             else:
-                prob += transfer_in[i] >= s[i]
+                # If not owned but in squad (s[i]=1), transfer[i] must be 1 (BUY)
+                prob += transfer[i] >= s[i]
         
-        total_transfers = pulp.lpSum([transfer_in[i] for i in players.index])
+        # Total transfers = (Buys + Sells) / 2
+        total_transfers = pulp.lpSum([transfer[i] for i in players.index]) / 2
+        
         num_hits = pulp.LpVariable("num_hits", lowBound=0, cat=pulp.LpInteger)
         prob += num_hits >= total_transfers - ft_available
         
@@ -241,11 +247,14 @@ def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available):
     prob += pulp.lpSum([lineup[i] for i in players.index if players.loc[i, 'element_type'] == 4]) >= 1
     
     if not is_wc:
-        max_allowed = ft_available + (5 if allow_hit else 0)
-        prob += pulp.lpSum([transfer_in[i] for i in players.index]) <= max_allowed
+        # Ensure we don't exceed allowed transfers if hits aren't permitted
+        # Or cap the solver to prevent excessive hits (max 5 extra)
+        max_transfers = ft_available + (5 if allow_hit else 0)
+        prob += (pulp.lpSum([transfer[i] for i in players.index]) / 2) <= max_transfers
 
     prob.solve(pulp.PULP_CBC_CMD(msg=0))
     
+    # --- RESULT PARSING ---
     res = players.loc[[i for i in players.index if s[i].varValue == 1]].copy()
     cap_id = [i for i in players.index if captain[i].varValue == 1][0]
     cap_name = players.loc[cap_id, 'web_name']
@@ -398,3 +407,4 @@ if players is not None:
 
 else:
     st.warning("Please enter your Team ID in the sidebar to begin.")
+
