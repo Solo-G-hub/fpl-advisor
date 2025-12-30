@@ -16,7 +16,6 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 try:
     static_init = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/").json()
     events_init = pd.DataFrame(static_init["events"])
-    # Find the gameweek marked as 'is_next'
     next_gw_auto = int(events_init[events_init["is_next"] == True].iloc[0]["id"]) if not events_init[events_init["is_next"] == True].empty else 38
 except:
     next_gw_auto = 19
@@ -28,24 +27,24 @@ def sync_prices_to_sheets(team_id, current_gw):
         static = requests.get(f"{base_url}bootstrap-static/").json()
         players_lookup = pd.DataFrame(static["elements"])[['id', 'web_name']]
         
-        # We sync based on the CURRENT or PREVIOUS week (whenever picks are actually available)
         r = requests.get(f"{base_url}entry/{team_id}/event/{current_gw}/picks/")
         if r.status_code != 200:
              r = requests.get(f"{base_url}entry/{team_id}/event/{current_gw-1}/picks/")
 
         if r.status_code == 200:
             picks = r.json()['picks']
+            # Create the DataFrame with the exact column names the app expects
             new_data = pd.DataFrame([
                 {"web_name": players_lookup[players_lookup['id'] == p['element']]['web_name'].values[0], 
                  "purchase_price": p['purchase_price'] / 10} 
                 for p in picks
             ])
             conn.update(worksheet="Prices", data=new_data)
-            st.success("✅ Google Sheet updated! Refreshing...")
             st.cache_data.clear()
+            st.success("✅ Google Sheet updated! Refreshing...")
             st.rerun()
         else:
-            st.error("❌ Sync failed. (Note: New teams only appear after the GW deadline)")
+            st.error("❌ Sync failed. Team ID might be wrong or deadline hasn't passed.")
     except Exception as e:
         st.error(f"Sync Error: {e}")
 
@@ -53,7 +52,6 @@ def sync_prices_to_sheets(team_id, current_gw):
 with st.sidebar:
     st.header("⚙️ Configuration")
     team_id = st.number_input("Enter FPL Team ID", value=5816864, step=1)
-    # Automatically defaults to the next gameweek
     current_gw = st.number_input("Target Gameweek", value=next_gw_auto, step=1)
     
     buffer = st.number_input("Safety Buffer (m)", min_value=0.0, max_value=2.0, value=0.2, step=0.1)
@@ -85,7 +83,6 @@ def get_fpl_data(t_id, gw, horizon):
         fixtures = pd.DataFrame(requests.get(f"{base_url}fixtures/").json())
         players["team_name"] = players["team"].map(teams)
         
-        # Logic: Fetch picks from the LAST gameweek that has passed (or is current)
         current_gw_api = int(events[events["is_current"]].iloc[0]["id"]) if not events[events["is_current"]].empty else gw
         gw_fetch = min(int(gw)-1, current_gw_api)
 
@@ -95,21 +92,20 @@ def get_fpl_data(t_id, gw, horizon):
         r_picks = requests.get(f"{base_url}entry/{t_id}/event/{gw_fetch}/picks/")
         picks_data = r_picks.json() if r_picks.status_code == 200 else None
         
-        if not picks_data: raise ValueError("Invalid team ID or data not yet available for this GW")
-        
-        if picks_data.get("active_chip") == "freehit":
-            r_prev = requests.get(f"{base_url}entry/{t_id}/event/{gw_fetch - 1}/picks/")
-            picks_data = r_prev.json()
+        if not picks_data: raise ValueError("Invalid team ID")
         
         owned_ids = [p['element'] for p in picks_data["picks"]]
         bank = picks_data["entry_history"]["bank"] / 10
 
+        # --- REFINED GOOGLE SHEETS LOGIC ---
+        price_map = {}
+        players["web_name_clean"] = players["web_name"].str.strip().str.lower()
         try:
             df_gsheet = conn.read(worksheet="Prices", ttl=0)
-            players["web_name_clean"] = players["web_name"].str.strip().str.lower()
-            price_map = {row['web_name'].strip().lower(): row['purchase_price'] for _, row in df_gsheet.iterrows()}
+            if not df_gsheet.empty and 'web_name' in df_gsheet.columns:
+                price_map = {str(row['web_name']).strip().lower(): row['purchase_price'] for _, row in df_gsheet.iterrows() if 'purchase_price' in row}
         except:
-            price_map = {}
+            pass
         
         players["current_price"] = players["now_cost"] / 10
         players["cost"] = players["current_price"]
