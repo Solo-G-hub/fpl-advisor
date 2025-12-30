@@ -25,24 +25,19 @@ def sync_prices_to_sheets(team_id, current_gw):
     """Fetches live team and purchase prices using transfer history for accuracy."""
     base_url = "https://fantasy.premierleague.com/api/"
     try:
-        # 1. Fetch static data for name mapping and fallback prices
         static = requests.get(f"{base_url}bootstrap-static/").json()
         players_lookup = {p['id']: p['web_name'] for p in static["elements"]}
         players_now_cost = {p['id']: p['now_cost'] for p in static["elements"]}
         
-        # 2. Get current squad
         r = requests.get(f"{base_url}entry/{team_id}/event/{current_gw}/picks/")
         if r.status_code != 200:
              r = requests.get(f"{base_url}entry/{team_id}/event/{current_gw-1}/picks/")
         
         if r.status_code == 200:
             picks_list = r.json().get('picks', [])
-            
-            # 3. Get transfer history to find actual purchase prices
             transfers_r = requests.get(f"{base_url}entry/{team_id}/transfers/")
             transfer_data = transfers_r.json() if transfers_r.status_code == 200 else []
             
-            # Create a map of player_id -> purchase_price (most recent transfer)
             history_prices = {}
             for t in sorted(transfer_data, key=lambda x: x['time']):
                 history_prices[t['element_in']] = t['element_in_cost']
@@ -51,8 +46,6 @@ def sync_prices_to_sheets(team_id, current_gw):
             for p in picks_list:
                 p_id = p.get('element')
                 name = players_lookup.get(p_id, "Unknown")
-                
-                # Logic: 1. Transfer History, 2. Picks Data, 3. Fallback to Current Price
                 raw_price = history_prices.get(p_id) 
                 if not raw_price:
                     raw_price = p.get('purchase_price', 0)
@@ -62,13 +55,8 @@ def sync_prices_to_sheets(team_id, current_gw):
                 rows.append({"web_name": name, "purchase_price": raw_price / 10.0})
             
             new_data = pd.DataFrame(rows)
-            
-            # 4. Update the Google Sheet
             conn.update(worksheet="Prices", data=new_data)
-            
-            # Store timestamp in session state
             st.session_state.last_sync = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
             st.cache_data.clear()
             st.success("✅ Prices & Transfers Synced!")
             st.rerun()
@@ -82,7 +70,6 @@ with st.sidebar:
     st.header("⚙️ Configuration")
     team_id = st.number_input("Enter FPL Team ID", value=5816864, step=1)
     current_gw = st.number_input("Target Gameweek", value=next_gw_auto, step=1)
-    
     buffer = st.number_input("Safety Buffer (m)", min_value=0.0, max_value=2.0, value=0.2, step=0.1)
     
     st.markdown("---")
@@ -112,14 +99,23 @@ def get_fpl_data(t_id, gw, horizon):
         players = pd.DataFrame(static["elements"])
         teams = {t["id"]: t["name"] for t in static["teams"]}
         events = pd.DataFrame(static["events"])
-        fixtures = pd.DataFrame(requests.get(f"{base_url}fixtures/").json())
+        fixtures_raw = requests.get(f"{base_url}fixtures/").json()
+        fixtures = pd.DataFrame(fixtures_raw)
         players["team_name"] = players["team"].map(teams)
+        
+        # --- DOUBLE GAMEWEEK LOGIC ---
+        target_fixtures = fixtures[fixtures["event"] == gw]
+        home_counts = target_fixtures["team_h"].value_counts()
+        away_counts = target_fixtures["team_a"].value_counts()
+        fixture_counts = (home_counts.add(away_counts, fill_value=0)).to_dict()
+        players["gw_fixtures"] = players["team"].map(fixture_counts).fillna(0).astype(int)
         
         current_gw_api = int(events[events["is_current"]].iloc[0]["id"]) if not events[events["is_current"]].empty else gw
         gw_fetch = min(int(gw)-1, current_gw_api)
 
+        # --- REFRESHED CHIP LOGIC (GW20+) ---
         history = requests.get(f"{base_url}entry/{t_id}/history/").json()
-        used_chips = [c['name'] for c in history.get('chips', [])]
+        used_chips = [c['name'] for c in history.get('chips', []) if c['event'] >= 20]
 
         r_picks = requests.get(f"{base_url}entry/{t_id}/event/{gw_fetch}/picks/")
         picks_data = r_picks.json() if r_picks.status_code == 200 else None
@@ -129,7 +125,6 @@ def get_fpl_data(t_id, gw, horizon):
         owned_ids = [p['element'] for p in picks_data["picks"]]
         bank = picks_data["entry_history"]["bank"] / 10
 
-        # --- REFINED GOOGLE SHEETS LOGIC ---
         price_map = {}
         players["web_name_clean"] = players["web_name"].str.strip().str.lower()
         try:
@@ -157,7 +152,9 @@ def get_fpl_data(t_id, gw, horizon):
 
         players["avg_fdr"] = players["team"].apply(lambda x: get_fdr(x, gw, horizon))
         players["base_xp"] = pd.to_numeric(players["ep_next"], errors="coerce").fillna(0)
-        players["xp"] = players["base_xp"] * (1 + (3 - players["avg_fdr"]) * 0.1 * fdr_weight)
+        
+        # Scale XP by fixture count for the target week
+        players["xp"] = players["base_xp"] * (1 + (3 - players["avg_fdr"]) * 0.1 * fdr_weight) * players["gw_fixtures"]
         players["pos_name"] = players["element_type"].map({1:"GKP",2:"DEF",3:"MID",4:"FWD"})
         
         return players[players["status"].isin(["a","d"])], owned_ids, bank, used_chips
@@ -316,9 +313,22 @@ if players is not None:
             c_chips[i].metric(display_name, status)
 
         st.divider()
-        st.subheader("💡 Strategic Advice")
-        if avg_team_fdr > 3.8 and 'freehit' not in used_chips:
-            st.error("🃏 **Free Hit Advice:** Your squad faces very difficult fixtures. Consider a Free Hit.")
+        st.subheader("💡 Second Half Tactical Radar")
+        
+        # Double Gameweek Logic
+        dgw_players = current_df[current_df['gw_fixtures'] >= 2]
+        if not dgw_players.empty and 'bboost' not in used_chips:
+            st.success(f"🚀 **Bench Boost Potential:** You have {len(dgw_players)} players playing twice this week!")
+        
+        # Triple Captain Logic
+        top_p = current_df.nlargest(1, 'xp').iloc[0]
+        if top_p['gw_fixtures'] >= 2 and '3xc' not in used_chips:
+            st.info(f"👑 **Triple Captain Alert:** {top_p['web_name']} has a Double Gameweek. High ceiling detected.")
+
+        # Blank Gameweek Logic
+        blanks = current_df[current_df['gw_fixtures'] == 0]
+        if len(blanks) >= 3 and 'freehit' not in used_chips:
+            st.error(f"🃏 **Free Hit Advice:** {len(blanks)} players have NO fixture. Consider a Free Hit.")
         
         st.divider()
         if is_sim:
@@ -329,7 +339,7 @@ if players is not None:
         else: st.success("✅ Showing Your Current Squad")
 
         df_view = players[players['id'].isin(st.session_state.squad_ids)].copy()
-        st.dataframe(df_view[['web_name','team_name','pos_name','purchase_price','current_price','selling_price','xp','avg_fdr']]
+        st.dataframe(df_view[['web_name','team_name','pos_name','purchase_price','current_price','selling_price','xp','gw_fixtures','avg_fdr']]
                      .style.background_gradient(subset=['avg_fdr'], cmap='RdYlGn_r')
                      .format({'xp':'{:.2f}', 'selling_price':'£{:.1f}m', 'current_price':'£{:.1f}m', 'purchase_price':'£{:.1f}m'}), use_container_width=True)
         
