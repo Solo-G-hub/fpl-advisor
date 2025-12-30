@@ -145,10 +145,8 @@ def get_fpl_data(t_id, gw, horizon, min_mins, inc_doubtful):
         players["avg_fdr"] = players["team"].apply(lambda x: get_fdr(x, gw, horizon))
         players["base_xp"] = pd.to_numeric(players["ep_next"], errors="coerce").fillna(0)
         
-        # --- XP CALCULATION WITH DOUBTFUL PENALTY ---
-        # Formula: Base XP * (Fixture Multiplier) * (Status Multiplier)
         players["xp"] = players["base_xp"] * (1 + (3 - players["avg_fdr"]) * 0.1 * fdr_weight)
-        players.loc[players["status"] == "d", "xp"] *= 0.75 # 25% penalty for yellow flags
+        players.loc[players["status"] == "d", "xp"] *= 0.75 
         
         players["pos_name"] = players["element_type"].map({1:"GKP",2:"DEF",3:"MID",4:"FWD"})
         
@@ -252,7 +250,6 @@ if players is not None:
         res_sq, cap, vc = run_optimizer(players, owned_ids, initial_wealth - buffer, is_wildcard, allow_hit, ft_available)
         
         with tab1:
-            # --- RISK WARNING BANNER ---
             starting_doubtful = res_sq[(res_sq['Status_Icon'] == "⚽ START") & (res_sq['status'] == "d")]
             if len(starting_doubtful) >= 2:
                 st.warning(f"⚠️ **High Risk Alert:** Your optimized starting lineup contains **{len(starting_doubtful)}** doubtful players. Note: XP for doubtful players has been auto-reduced by 25%.")
@@ -270,11 +267,24 @@ if players is not None:
             st.divider()
             res_sq.loc[res_sq['web_name'] == cap, 'Status_Icon'] = "👑 CAPTAIN"
             res_sq.loc[res_sq['web_name'] == vc, 'Status_Icon'] = "🥈 VICE-CAP"
-            
-            # Show XP adjusted for status in table
             st.table(res_sq[['Status_Icon', 'pos_name', 'team_name', 'web_name', 'xp', 'status']])
 
     with tab2:
+        # --- CHIP TRACKER ---
+        st.subheader("🎫 Chip Status")
+        all_chips = ["wildcard", "freehit", "bboost", "3xc"]
+        cols = st.columns(4)
+        for i, chip in enumerate(all_chips):
+            display_name = chip.upper() if chip != "bboost" else "BENCH BOOST"
+            display_name = "TRIPLE CAPTAIN" if chip == "3xc" else display_name
+            display_name = "FREE HIT" if chip == "freehit" else display_name
+            
+            if chip in used_chips:
+                cols[i].error(f"❌ {display_name}")
+            else:
+                cols[i].success(f"✅ {display_name}")
+        
+        st.divider()
         if is_sim:
             if st.button("↩️ Reset to My Real Squad"):
                 st.session_state.squad_ids = owned_ids
