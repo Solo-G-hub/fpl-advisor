@@ -4,6 +4,7 @@ import requests
 import pandas as pd
 import pulp
 import math
+from datetime import datetime
 
 # --- APP SETUP ---
 st.set_page_config(page_title="FPL Tactical Advisor", layout="wide")
@@ -21,44 +22,58 @@ except:
     next_gw_auto = 19
 
 def sync_prices_to_sheets(team_id, current_gw):
-    """Fetches live team and overwrites the Google Sheet."""
+    """Fetches live team and purchase prices using transfer history for accuracy."""
     base_url = "https://fantasy.premierleague.com/api/"
     try:
-        # 1. Fetch static data for name mapping
+        # 1. Fetch static data for name mapping and fallback prices
         static = requests.get(f"{base_url}bootstrap-static/").json()
         players_lookup = {p['id']: p['web_name'] for p in static["elements"]}
+        players_now_cost = {p['id']: p['now_cost'] for p in static["elements"]}
         
-        # 2. Fetch specific team picks
+        # 2. Get current squad
         r = requests.get(f"{base_url}entry/{team_id}/event/{current_gw}/picks/")
         if r.status_code != 200:
              r = requests.get(f"{base_url}entry/{team_id}/event/{current_gw-1}/picks/")
-
+        
         if r.status_code == 200:
             picks_list = r.json().get('picks', [])
             
-            # 3. Carefully build the list of dictionaries to avoid KeyErrors
+            # 3. Get transfer history to find actual purchase prices
+            transfers_r = requests.get(f"{base_url}entry/{team_id}/transfers/")
+            transfer_data = transfers_r.json() if transfers_r.status_code == 200 else []
+            
+            # Create a map of player_id -> purchase_price (most recent transfer)
+            history_prices = {}
+            for t in sorted(transfer_data, key=lambda x: x['time']):
+                history_prices[t['element_in']] = t['element_in_cost']
+
             rows = []
             for p in picks_list:
                 p_id = p.get('element')
-                # Use .get() and default values to prevent crashes if a key is missing
                 name = players_lookup.get(p_id, "Unknown")
-                price = p.get('purchase_price', 0) / 10.0
-                rows.append({"web_name": name, "purchase_price": price})
+                
+                # Logic: 1. Transfer History, 2. Picks Data, 3. Fallback to Current Price
+                raw_price = history_prices.get(p_id) 
+                if not raw_price:
+                    raw_price = p.get('purchase_price', 0)
+                if raw_price == 0:
+                    raw_price = players_now_cost.get(p_id, 0)
+                
+                rows.append({"web_name": name, "purchase_price": raw_price / 10.0})
             
-            if not rows:
-                st.error("No player data found to sync.")
-                return
-
             new_data = pd.DataFrame(rows)
             
             # 4. Update the Google Sheet
             conn.update(worksheet="Prices", data=new_data)
             
+            # Store timestamp in session state
+            st.session_state.last_sync = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
             st.cache_data.clear()
-            st.success("✅ Google Sheet updated! Refreshing...")
+            st.success("✅ Prices & Transfers Synced!")
             st.rerun()
         else:
-            st.error(f"❌ Sync failed. FPL API returned status: {r.status_code}")
+            st.error(f"❌ Sync failed. FPL API status: {r.status_code}")
     except Exception as e:
         st.error(f"Sync Error: {e}")
 
@@ -84,6 +99,9 @@ with st.sidebar:
     st.divider()
     if st.button("🔄 Sync Prices with FPL"):
         sync_prices_to_sheets(team_id, current_gw)
+    
+    if 'last_sync' in st.session_state:
+        st.caption(f"Last Synced: {st.session_state.last_sync}")
 
 # --- CORE FUNCTIONS ---
 @st.cache_data(ttl=3600)
@@ -117,7 +135,6 @@ def get_fpl_data(t_id, gw, horizon):
         try:
             df_gsheet = conn.read(worksheet="Prices", ttl=0)
             if not df_gsheet.empty and 'web_name' in df_gsheet.columns:
-                # Fixed: ensure keys are string before strip/lower
                 price_map = {str(row['web_name']).strip().lower(): row['purchase_price'] for _, row in df_gsheet.iterrows() if 'purchase_price' in row}
         except:
             pass
