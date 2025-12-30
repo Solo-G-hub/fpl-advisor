@@ -30,6 +30,10 @@ def sync_prices_to_sheets(team_id, current_gw):
             # Overwrites the 'Prices' worksheet with your new Wildcard squad
             conn.update(worksheet="Prices", data=new_data)
             st.success("✅ Google Sheet updated! Refreshing...")
+            
+            # --- ADJUSTMENT: CLEAR CACHE SO FRESH DATA IS READ IMMEDIATELY ---
+            st.cache_data.clear()
+            
             st.rerun()
         else:
             st.error("❌ Sync failed. (Note: New teams only appear after the GW deadline)")
