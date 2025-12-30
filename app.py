@@ -78,6 +78,10 @@ with st.sidebar:
     horizon = st.slider("Planning Horizon (Weeks)", 1, 8, 5)
     fdr_weight = st.slider("Fixture Difficulty Weight", 0.0, 1.0, 0.5)
     
+    st.subheader("🧪 Decay Rates (Horizon)")
+    att_decay = st.slider("Attacker Decay (MID/FWD)", 0.5, 1.0, 0.9, 0.05)
+    def_decay = st.slider("Defender Decay (GKP/DEF)", 0.5, 1.0, 0.75, 0.05)
+    
     st.markdown("---")
     st.header("🧠 Decision Logic")
     min_gain_threshold = st.slider("Min XP Gain to Transfer", 0.0, 3.0, 0.75, 0.25)
@@ -92,7 +96,7 @@ with st.sidebar:
 
 # --- CORE FUNCTIONS ---
 @st.cache_data(ttl=3600)
-def get_fpl_data(t_id, gw, horizon):
+def get_fpl_data(t_id, gw, horizon, att_decay, def_decay):
     base_url = "https://fantasy.premierleague.com/api/"
     try:
         static = requests.get(f"{base_url}bootstrap-static/").json()
@@ -103,11 +107,9 @@ def get_fpl_data(t_id, gw, horizon):
         fixtures = pd.DataFrame(fixtures_raw)
         players["team_name"] = players["team"].map(teams)
         
-        # --- DOUBLE GAMEWEEK LOGIC ---
+        # Current GW Fixtures for DGW Alerts
         target_fixtures = fixtures[fixtures["event"] == gw]
-        home_counts = target_fixtures["team_h"].value_counts()
-        away_counts = target_fixtures["team_a"].value_counts()
-        fixture_counts = (home_counts.add(away_counts, fill_value=0)).to_dict()
+        fixture_counts = (target_fixtures["team_h"].value_counts().add(target_fixtures["team_a"].value_counts(), fill_value=0)).to_dict()
         players["gw_fixtures"] = players["team"].map(fixture_counts).fillna(0).astype(int)
         
         current_gw_api = int(events[events["is_current"]].iloc[0]["id"]) if not events[events["is_current"]].empty else gw
@@ -152,19 +154,30 @@ def get_fpl_data(t_id, gw, horizon):
         players["avg_fdr"] = players["team"].apply(lambda x: get_fdr(x, gw, horizon))
         players["base_xp"] = pd.to_numeric(players["ep_next"], errors="coerce").fillna(0)
         
-        # --- FIXED: POSITION-AWARE XP CALIBRATION ---
-        def calibrate_xp(row):
-            # Defenders/Keepers (Type 1 & 2) penalized more heavily for high FDR
-            if row["element_type"] in [1, 2]:
-                pos_sensitivity = 1.5
-            else: # Midfielders/Forwards (Type 3 & 4) penalized less
-                pos_sensitivity = 0.7
+        # --- RE-IMPLEMENTED: MULTI-WEEK HORIZON XP CALIBRATION ---
+        def calibrate_horizon_xp(row):
+            decay = def_decay if row["element_type"] in [1, 2] else att_decay
+            pos_sensitivity = 1.5 if row["element_type"] in [1, 2] else 0.7
+            
+            total_projected_xp = 0
+            for week_offset in range(horizon):
+                lookahead_gw = gw + week_offset
+                weekly_fixtures = fixtures[fixtures["event"] == lookahead_gw]
+                player_games = weekly_fixtures[(weekly_fixtures["team_h"] == row["team"]) | (weekly_fixtures["team_a"] == row["team"])]
                 
-            fdr_mod = (1 + (3 - row["avg_fdr"]) * 0.1 * fdr_weight * pos_sensitivity)
-            dgw_mod = 1.0 if row["gw_fixtures"] <= 1 else 1.2 
-            return row["base_xp"] * fdr_mod * dgw_mod
+                gw_xp_acc = 0
+                for _, f in player_games.iterrows():
+                    f_diff = f["team_h_difficulty"] if f["team_h"] == row["team"] else f["team_a_difficulty"]
+                    # Dynamic FDR modifier per week
+                    fdr_mod = (1 + (3 - f_diff) * 0.1 * fdr_weight * pos_sensitivity)
+                    gw_xp_acc += row["base_xp"] * fdr_mod
+                
+                # Apply decay based on distance from current GW
+                total_projected_xp += gw_xp_acc * (decay ** week_offset)
+                
+            return total_projected_xp
 
-        players["xp"] = players.apply(calibrate_xp, axis=1)
+        players["xp"] = players.apply(calibrate_horizon_xp, axis=1)
         players["pos_name"] = players["element_type"].map({1:"GKP",2:"DEF",3:"MID",4:"FWD"})
         
         return players[players["status"].isin(["a","d"])], owned_ids, bank, used_chips
@@ -223,7 +236,8 @@ def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available):
     return res, cap_name, vc_name
 
 # --- MAIN APP ---
-players, owned_ids, live_bank, used_chips = get_fpl_data(team_id, current_gw, horizon)
+# Pass new decay sliders into data fetcher
+players, owned_ids, live_bank, used_chips = get_fpl_data(team_id, current_gw, horizon, att_decay, def_decay)
 
 if players is not None:
     if 'squad_ids' not in st.session_state:
@@ -250,7 +264,7 @@ if players is not None:
         total_team_xp = current_df['xp'].sum()
         avg_team_fdr = current_df['avg_fdr'].mean()
         
-        if total_team_xp < 45 or avg_team_fdr > 3.7:
+        if total_team_xp < (45 * horizon * 0.7) or avg_team_fdr > 3.7:
              st.info("🔔 **Chip Recommendation Available:** Check Tab 2 for strategy advice.")
 
         st.subheader("💰 Dynamic Financial Summary")
@@ -296,19 +310,20 @@ if players is not None:
                     for _, p in in_players.iterrows():
                         st.success(f"IN: {p['web_name']} ({p['team_name']})")
                 
+                # Check gain based on horizon-weighted XP
                 current_top_11_xp = players[players['id'].isin(owned_ids)].nlargest(11, 'xp')['xp'].sum()
                 new_top_11_xp = res_sq[res_sq['Status'].str.contains("⚽|👑")]['xp'].sum()
                 net_gain = new_top_11_xp - current_top_11_xp
                 
                 if net_gain < min_gain_threshold and not is_wildcard:
-                    st.warning(f"⚠️ **Marginal Gain:** Move adds +{net_gain:.2f} XP. Threshold is {min_gain_threshold}. Consider banking!")
+                    st.warning(f"⚠️ **Marginal Gain:** Move adds +{net_gain:.2f} Horizon XP. Threshold is {min_gain_threshold}. Consider banking!")
                 else:
-                    st.info(f"✨ **Strategy Value:** Move improves Starting 11 by +{max(0, net_gain):.2f} XP.")
+                    st.info(f"✨ **Strategy Value:** Move improves Starting 11 by +{max(0, net_gain):.2f} Total Horizon XP.")
             else:
                 st.info("✅ Your current squad is mathematically optimal. No transfers needed!")
             
             st.divider()
-            st.success(f"Projected Score: {res_sq[res_sq['Status'] == '⚽ START']['xp'].sum():.1f} | Captain: {cap}")
+            st.success(f"Total Horizon XP: {res_sq[res_sq['Status'] == '⚽ START']['xp'].sum():.1f} | Captain: {cap}")
             res_sq.loc[res_sq['web_name'] == cap, 'Status'] = "👑 CAPTAIN"
             res_sq.loc[res_sq['web_name'] == vc, 'Status'] = "🥈 VICE-CAP"
             st.table(res_sq[['Status', 'pos_name', 'team_name', 'web_name', 'xp']])
