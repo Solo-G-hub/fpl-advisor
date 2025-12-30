@@ -192,30 +192,41 @@ def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available):
     s = pulp.LpVariable.dicts("squad", players.index, cat=pulp.LpBinary)  
     lineup = pulp.LpVariable.dicts("lineup", players.index, cat=pulp.LpBinary)  
     captain = pulp.LpVariable.dicts("captain", players.index, cat=pulp.LpBinary) 
-    # Logic Fix: Single transfer variable to track both buys and sells
     transfer = pulp.LpVariable.dicts("transfer", players.index, cat=pulp.LpBinary)
     
+    # --- DGW MITIGATION LOGIC ---
+    # We calculate a specific 'captain_xp' that only doubles the IMMEDIATE GW points
+    # and applies diminishing returns to the 2nd game of a DGW to avoid over-weighting.
+    captain_xp_values = {}
+    for i in players.index:
+        current_gw_fixtures = players.loc[i, 'gw_fixtures']
+        base_xp = players.loc[i, 'base_xp']
+        
+        if current_gw_fixtures > 1:
+            # Diminishing returns: 100% of 1st game + 70% of 2nd game
+            effective_current_xp = base_xp + (base_xp * 0.7)
+        else:
+            effective_current_xp = base_xp
+            
+        captain_xp_values[i] = effective_current_xp
+
     # --- OBJECTIVE FUNCTION ---
     starters_score = pulp.lpSum([players.loc[i, 'xp'] * lineup[i] for i in players.index])
-    captain_bonus = pulp.lpSum([players.loc[i, 'xp'] * captain[i] for i in players.index])
+    # Apply the mitigated bonus
+    captain_bonus = pulp.lpSum([captain_xp_values[i] * captain[i] for i in players.index])
     bench_score = pulp.lpSum([players.loc[i, 'xp'] * (s[i] - lineup[i]) for i in players.index]) * 0.15
     
     if is_wc:
         transfer_penalty = 0
         loyalty_score = 0
     else:
-        # ✅ Corrected Transfer Logic
         for i in players.index:
             if players.loc[i, 'id'] in owned_ids:
-                # If owned but not in squad (s[i]=0), transfer[i] must be 1 (SELL)
                 prob += transfer[i] >= 1 - s[i]
             else:
-                # If not owned but in squad (s[i]=1), transfer[i] must be 1 (BUY)
                 prob += transfer[i] >= s[i]
         
-        # Total transfers = (Buys + Sells) / 2
         total_transfers = pulp.lpSum([transfer[i] for i in players.index]) / 2
-        
         num_hits = pulp.LpVariable("num_hits", lowBound=0, cat=pulp.LpInteger)
         prob += num_hits >= total_transfers - ft_available
         
@@ -247,8 +258,6 @@ def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available):
     prob += pulp.lpSum([lineup[i] for i in players.index if players.loc[i, 'element_type'] == 4]) >= 1
     
     if not is_wc:
-        # Ensure we don't exceed allowed transfers if hits aren't permitted
-        # Or cap the solver to prevent excessive hits (max 5 extra)
         max_transfers = ft_available + (5 if allow_hit else 0)
         prob += (pulp.lpSum([transfer[i] for i in players.index]) / 2) <= max_transfers
 
@@ -260,14 +269,21 @@ def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available):
     cap_name = players.loc[cap_id, 'web_name']
     
     starters_ids = [i for i in players.index if lineup[i].varValue == 1]
+    # Find the best XP player among starters who is NOT the captain
     vc_options = res[res.index.isin(starters_ids) & (res.index != cap_id)]
-    vc_name = vc_options.sort_values(by='xp', ascending=False).iloc[0]['web_name']
+    vc_row = vc_options.sort_values(by='xp', ascending=False).iloc[0]
+    vc_id = vc_row.name
+    vc_name = vc_row['web_name']
     
+    # Define Statuses
     res['Status'] = ["⚽ START" if lineup[i].varValue == 1 else "🪑 BENCH" for i in res.index]
     res.loc[cap_id, 'Status'] = "👑 CAPTAIN"
+    res.loc[vc_id, 'Status'] = "🥈 VICE-CAP"  # Add Vice Captain label
     
+    # Sort for display: Captain first, then Vice, then Starters, then Bench
     res['sort_rank'] = 0
     res.loc[res['Status'] == "👑 CAPTAIN", 'sort_rank'] = -1
+    res.loc[res['Status'] == "🥈 VICE-CAP", 'sort_rank'] = -0.5
     res.loc[(res['Status'] == "🪑 BENCH") & (res['element_type'] == 1), 'sort_rank'] = 1
     res.loc[(res['Status'] == "🪑 BENCH") & (res['element_type'] != 1), 'sort_rank'] = 2
     res = res.sort_values(by=['sort_rank', 'xp'], ascending=[True, False])
@@ -407,4 +423,5 @@ if players is not None:
 
 else:
     st.warning("Please enter your Team ID in the sidebar to begin.")
+
 
