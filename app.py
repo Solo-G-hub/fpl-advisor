@@ -1,4 +1,5 @@
 import streamlit as st
+from streamlit_gsheets import GSheetsConnection
 import requests
 import pandas as pd
 import pulp
@@ -7,6 +8,33 @@ import math
 # --- APP SETUP ---
 st.set_page_config(page_title="FPL Tactical Advisor", layout="wide")
 st.title("⚽ FPL Tactical Advisor: Second Half Pro")
+
+# --- GOOGLE SHEETS CONNECTION ---
+conn = st.connection("gsheets", type=GSheetsConnection)
+
+def sync_prices_to_sheets(team_id, current_gw):
+    """Fetches live team and overwrites the Google Sheet."""
+    base_url = "https://fantasy.premierleague.com/api/"
+    try:
+        static = requests.get(f"{base_url}bootstrap-static/").json()
+        players_lookup = pd.DataFrame(static["elements"])[['id', 'web_name']]
+        
+        r = requests.get(f"{base_url}entry/{team_id}/event/{current_gw}/picks/")
+        if r.status_code == 200:
+            picks = r.json()['picks']
+            new_data = pd.DataFrame([
+                {"web_name": players_lookup[players_lookup['id'] == p['element']]['web_name'].values[0], 
+                 "purchase_price": p['purchase_price'] / 10} 
+                for p in picks
+            ])
+            # Overwrites the 'Prices' worksheet with your new Wildcard squad
+            conn.update(worksheet="Prices", data=new_data)
+            st.success("✅ Google Sheet updated! Refreshing...")
+            st.rerun()
+        else:
+            st.error("❌ Sync failed. (Note: New teams only appear after the GW deadline)")
+    except Exception as e:
+        st.error(f"Sync Error: {e}")
 
 # --- SIDEBAR SETTINGS ---
 with st.sidebar:
@@ -26,6 +54,10 @@ with st.sidebar:
     st.header("🧠 Decision Logic")
     min_gain_threshold = st.slider("Min XP Gain to Transfer", 0.0, 3.0, 0.75, 0.25)
     allow_hit = st.checkbox("Allow -4 Hit (+1 Extra Transfer)", value=False)
+    
+    st.divider()
+    if st.button("🔄 Sync Prices with FPL"):
+        sync_prices_to_sheets(team_id, current_gw)
 
 # --- CORE FUNCTIONS ---
 @st.cache_data(ttl=3600)
@@ -39,28 +71,27 @@ def get_fpl_data(t_id, gw, horizon):
         fixtures = pd.DataFrame(requests.get(f"{base_url}fixtures/").json())
         players["team_name"] = players["team"].map(teams)
         current_gw_api = int(events[events["is_current"]].iloc[0]["id"])
-        gw = min(int(gw), current_gw_api)
+        gw_fetch = min(int(gw), current_gw_api)
 
         history = requests.get(f"{base_url}entry/{t_id}/history/").json()
         used_chips = [c['name'] for c in history.get('chips', [])]
 
-        def fetch_picks(team_id, gw):
-            r = requests.get(f"{base_url}entry/{team_id}/event/{gw}/picks/")
-            return r.json() if r.status_code == 200 else None
-
-        picks_data = fetch_picks(t_id, gw)
+        r_picks = requests.get(f"{base_url}entry/{t_id}/event/{gw_fetch}/picks/")
+        picks_data = r_picks.json() if r_picks.status_code == 200 else None
+        
         if not picks_data: raise ValueError("Invalid team ID")
         if picks_data.get("active_chip") == "freehit":
-            picks_data = fetch_picks(t_id, gw - 1)
+            r_prev = requests.get(f"{base_url}entry/{t_id}/event/{gw_fetch - 1}/picks/")
+            picks_data = r_prev.json()
         
         owned_ids = [p['element'] for p in picks_data["picks"]]
         bank = picks_data["entry_history"]["bank"] / 10
 
+        # --- UPDATED: READ FROM GOOGLE SHEETS ---
         try:
-            df_prices = pd.read_csv("purchase_prices.csv")
-            df_prices["purchase_price"] = df_prices["purchase_price"].astype(float)
+            df_gsheet = conn.read(worksheet="Prices", ttl=0)
             players["web_name_clean"] = players["web_name"].str.strip().str.lower()
-            price_map = {row['web_name'].strip().lower(): row['purchase_price'] for _, row in df_prices.iterrows()}
+            price_map = {row['web_name'].strip().lower(): row['purchase_price'] for _, row in df_gsheet.iterrows()}
         except:
             price_map = {}
         
@@ -102,7 +133,6 @@ def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available):
     loyalty_score = pulp.lpSum([loyalty for i in players.index if players.loc[i, 'id'] in owned_ids and s[i] == 1])
     
     prob += starters_score + bench_score + loyalty_score
-
     prob += pulp.lpSum([s[i] for i in players.index]) == 15
     prob += pulp.lpSum([players.loc[i, 'cost'] * s[i] for i in players.index]) <= budget
     
@@ -259,7 +289,6 @@ if players is not None:
                      .style.background_gradient(subset=['avg_fdr'], cmap='RdYlGn_r')
                      .format({'xp':'{:.2f}', 'selling_price':'£{:.1f}m', 'current_price':'£{:.1f}m', 'purchase_price':'£{:.1f}m'}), use_container_width=True)
         
-        # --- RESTORED METRICS ---
         st.divider()
         m_val, m_rem = st.columns(2)
         m_val.metric("Squad Sell Value", f"£{current_sell_value:.1f}m")
