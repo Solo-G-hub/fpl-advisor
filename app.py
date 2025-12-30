@@ -13,9 +13,11 @@ with st.sidebar:
     st.header("⚙️ Configuration")
     team_id = st.number_input("Enter FPL Team ID", value=5816864, step=1)
     current_gw = st.number_input("Current Gameweek", value=19, step=1)
-    buffer = 0.2
+    
+    # ADJUSTMENT MADE HERE: Interactive Buffer Input
+    buffer = st.number_input("Safety Buffer (m)", min_value=0.0, max_value=2.0, value=0.2, step=0.1)
+    
     st.markdown("---")
-    st.write("🛡️ **Safety Buffer:** 0.2m")
     st.header("📈 Strategy")
     horizon = st.slider("Planning Horizon (Weeks)", 1, 8, 5)
     fdr_weight = st.slider("Fixture Difficulty Weight", 0.0, 1.0, 0.5)
@@ -47,25 +49,17 @@ def get_fpl_data(t_id, gw, horizon):
         owned_ids = [p['element'] for p in picks_data["picks"]]
         bank = picks_data["entry_history"]["bank"] / 10
 
-        # Load Prices from CSV
         df_prices = pd.read_csv("purchase_prices.csv")
         df_prices["purchase_price"] = df_prices["purchase_price"].astype(float)
         players["web_name_clean"] = players["web_name"].str.strip().str.lower()
         price_map = {row['web_name'].strip().lower(): row['purchase_price'] for _, row in df_prices.iterrows()}
-        
+        players["purchase_price"] = players["web_name_clean"].map(price_map)
         players["current_price"] = players["now_cost"] / 10
         players["cost"] = players["current_price"]
 
-        # Resolve Purchase Price: Use CSV, else fallback to Current Price
-        def resolve_pp(row):
-            clean_name = row['web_name'].strip().lower()
-            return price_map.get(clean_name, row['current_price'])
-
-        players["purchase_price"] = players.apply(resolve_pp, axis=1)
-
         def calc_sell(row):
             pp, cp = row['purchase_price'], row['current_price']
-            # Profit Tax: Only keep 50% of the price rise
+            if pd.isna(pp): return cp
             return pp + 0.5 * (cp - pp) if cp > pp else cp
         
         players["selling_price"] = players.apply(calc_sell, axis=1)
@@ -121,11 +115,11 @@ if players is not None:
     if 'squad_ids' not in st.session_state:
         st.session_state.squad_ids = owned_ids
 
-    # FINANCIAL BASELINES
+    # INITIAL WEALTH (Fixed baseline)
     real_sell_value = players.loc[players['id'].isin(owned_ids), 'selling_price'].sum()
     initial_wealth = real_sell_value + live_bank
 
-    # DYNAMIC CALCULATIONS
+    # DYNAMIC CALCULATIONS (Current View)
     current_df = players[players['id'].isin(st.session_state.squad_ids)]
     is_sim = st.session_state.squad_ids != owned_ids
     
@@ -136,7 +130,6 @@ if players is not None:
     else:
         current_bank = live_bank
     
-    # Dynamic Wealth = Squad Sale Value (Simulated) + Remaining Bank (Simulated)
     dynamic_wealth = current_sell_value + current_bank
 
     tab1, tab2 = st.tabs(["🚀 Transfer Optimizer", "📋 My Squad & Prices"])
@@ -163,7 +156,6 @@ if players is not None:
                 st.session_state.squad_ids = sq['id'].tolist()
                 st.rerun()
 
-    # DISPLAY OPTIMIZED RESULTS
     if is_sim:
         res_sq, cap, vc = run_optimizer(players, owned_ids, initial_wealth - buffer, 
                                         is_wc=(len(set(st.session_state.squad_ids) - set(owned_ids)) > 2), 
