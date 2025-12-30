@@ -22,27 +22,22 @@ except:
     next_gw_auto = 19
 
 def sync_prices_to_sheets(team_id, current_gw):
-    """Fetches live team and purchase prices using transfer history for accuracy."""
+    """Fetches live team and purchase prices using transfer history."""
     base_url = "https://fantasy.premierleague.com/api/"
     try:
-        # 1. Fetch static data for name mapping and fallback prices
         static = requests.get(f"{base_url}bootstrap-static/").json()
         players_lookup = {p['id']: p['web_name'] for p in static["elements"]}
         players_now_cost = {p['id']: p['now_cost'] for p in static["elements"]}
         
-        # 2. Get current squad
         r = requests.get(f"{base_url}entry/{team_id}/event/{current_gw}/picks/")
         if r.status_code != 200:
              r = requests.get(f"{base_url}entry/{team_id}/event/{current_gw-1}/picks/")
         
         if r.status_code == 200:
             picks_list = r.json().get('picks', [])
-            
-            # 3. Get transfer history to find actual purchase prices
             transfers_r = requests.get(f"{base_url}entry/{team_id}/transfers/")
             transfer_data = transfers_r.json() if transfers_r.status_code == 200 else []
             
-            # Create a map of player_id -> purchase_price (most recent transfer)
             history_prices = {}
             for t in sorted(transfer_data, key=lambda x: x['time']):
                 history_prices[t['element_in']] = t['element_in_cost']
@@ -51,8 +46,6 @@ def sync_prices_to_sheets(team_id, current_gw):
             for p in picks_list:
                 p_id = p.get('element')
                 name = players_lookup.get(p_id, "Unknown")
-                
-                # Logic: 1. Transfer History, 2. Picks Data, 3. Fallback to Current Price
                 raw_price = history_prices.get(p_id) 
                 if not raw_price:
                     raw_price = p.get('purchase_price', 0)
@@ -62,13 +55,8 @@ def sync_prices_to_sheets(team_id, current_gw):
                 rows.append({"web_name": name, "purchase_price": raw_price / 10.0})
             
             new_data = pd.DataFrame(rows)
-            
-            # 4. Update the Google Sheet
             conn.update(worksheet="Prices", data=new_data)
-            
-            # Store timestamp in session state
             st.session_state.last_sync = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
             st.cache_data.clear()
             st.success("✅ Prices & Transfers Synced!")
             st.rerun()
@@ -82,7 +70,6 @@ with st.sidebar:
     st.header("⚙️ Configuration")
     team_id = st.number_input("Enter FPL Team ID", value=5816864, step=1)
     current_gw = st.number_input("Target Gameweek", value=next_gw_auto, step=1)
-    
     buffer = st.number_input("Safety Buffer (m)", min_value=0.0, max_value=2.0, value=0.2, step=0.1)
     
     st.markdown("---")
@@ -94,6 +81,8 @@ with st.sidebar:
     st.markdown("---")
     st.header("🧠 Decision Logic")
     min_gain_threshold = st.slider("Min XP Gain to Transfer", 0.0, 3.0, 0.75, 0.25)
+    min_minutes = st.slider("Min Minutes Played (Season)", 0, 3000, 0, 90)
+    include_doubtful = st.toggle("Include Doubtful (Yellow Flags)", value=True) 
     allow_hit = st.checkbox("Allow -4 Hit (+1 Extra Transfer)", value=False)
     
     st.divider()
@@ -105,7 +94,7 @@ with st.sidebar:
 
 # --- CORE FUNCTIONS ---
 @st.cache_data(ttl=3600)
-def get_fpl_data(t_id, gw, horizon):
+def get_fpl_data(t_id, gw, horizon, min_mins, inc_doubtful):
     base_url = "https://fantasy.premierleague.com/api/"
     try:
         static = requests.get(f"{base_url}bootstrap-static/").json()
@@ -123,13 +112,11 @@ def get_fpl_data(t_id, gw, horizon):
 
         r_picks = requests.get(f"{base_url}entry/{t_id}/event/{gw_fetch}/picks/")
         picks_data = r_picks.json() if r_picks.status_code == 200 else None
-        
         if not picks_data: raise ValueError("Invalid team ID")
         
         owned_ids = [p['element'] for p in picks_data["picks"]]
         bank = picks_data["entry_history"]["bank"] / 10
 
-        # --- REFINED GOOGLE SHEETS LOGIC ---
         price_map = {}
         players["web_name_clean"] = players["web_name"].str.strip().str.lower()
         try:
@@ -157,10 +144,19 @@ def get_fpl_data(t_id, gw, horizon):
 
         players["avg_fdr"] = players["team"].apply(lambda x: get_fdr(x, gw, horizon))
         players["base_xp"] = pd.to_numeric(players["ep_next"], errors="coerce").fillna(0)
+        
+        # --- XP CALCULATION WITH DOUBTFUL PENALTY ---
+        # Formula: Base XP * (Fixture Multiplier) * (Status Multiplier)
         players["xp"] = players["base_xp"] * (1 + (3 - players["avg_fdr"]) * 0.1 * fdr_weight)
+        players.loc[players["status"] == "d", "xp"] *= 0.75 # 25% penalty for yellow flags
+        
         players["pos_name"] = players["element_type"].map({1:"GKP",2:"DEF",3:"MID",4:"FWD"})
         
-        return players[players["status"].isin(["a","d"])], owned_ids, bank, used_chips
+        allowed_statuses = ["a", "d"] if inc_doubtful else ["a"]
+        eligible_mask = (players["status"].isin(allowed_statuses)) & (players["minutes"] >= min_mins)
+        final_pool = players[eligible_mask | players["id"].isin(owned_ids)].copy()
+        
+        return final_pool, owned_ids, bank, used_chips
     except Exception as e:
         st.error(f"FPL Error: {e}")
         return None, [], 0.0, []
@@ -172,7 +168,6 @@ def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available):
     
     starters_score = pulp.lpSum([players.loc[i, 'xp'] * lineup[i] for i in players.index])
     bench_score = pulp.lpSum([players.loc[i, 'xp'] * (s[i] - lineup[i]) for i in players.index]) * 0.15
-    
     loyalty = 0.0 if is_wc else 0.5
     loyalty_score = pulp.lpSum([loyalty for i in players.index if players.loc[i, 'id'] in owned_ids and s[i] == 1])
     
@@ -200,23 +195,21 @@ def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available):
     prob += pulp.lpSum([lineup[i] for i in players.index if players.loc[i, 'element_type'] == 4]) >= 1
     
     prob.solve(pulp.PULP_CBC_CMD(msg=0))
-    
     res = players.loc[[i for i in players.index if s[i].varValue == 1]].copy()
-    res['Status'] = ["⚽ START" if lineup[i].varValue == 1 else "🪑 BENCH" for i in res.index]
+    res['Status_Icon'] = ["⚽ START" if lineup[i].varValue == 1 else "🪑 BENCH" for i in res.index]
     
-    starters_df = res[res['Status'] == "⚽ START"].sort_values(by='xp', ascending=False)
+    starters_df = res[res['Status_Icon'] == "⚽ START"].sort_values(by='xp', ascending=False)
     cap_name = starters_df.iloc[0]['web_name']
     vc_name = starters_df.iloc[1]['web_name']
     
     res['sort_rank'] = 0
-    res.loc[(res['Status'] == "🪑 BENCH") & (res['element_type'] == 1), 'sort_rank'] = 1
-    res.loc[(res['Status'] == "🪑 BENCH") & (res['element_type'] != 1), 'sort_rank'] = 2
+    res.loc[(res['Status_Icon'] == "🪑 BENCH") & (res['element_type'] == 1), 'sort_rank'] = 1
+    res.loc[(res['Status_Icon'] == "🪑 BENCH") & (res['element_type'] != 1), 'sort_rank'] = 2
     res = res.sort_values(by=['sort_rank', 'xp'], ascending=[True, False])
-    
     return res, cap_name, vc_name
 
-# --- MAIN APP ---
-players, owned_ids, live_bank, used_chips = get_fpl_data(team_id, current_gw, horizon)
+# --- MAIN APP EXECUTION ---
+players, owned_ids, live_bank, used_chips = get_fpl_data(team_id, current_gw, horizon, min_minutes, include_doubtful)
 
 if players is not None:
     if 'squad_ids' not in st.session_state:
@@ -229,38 +222,26 @@ if players is not None:
     is_sim = st.session_state.squad_ids != owned_ids
     
     current_sell_value = current_df['selling_price'].sum()
-    if is_sim:
-        current_cost = current_df['cost'].sum()
-        current_bank = initial_wealth - current_cost
-    else:
-        current_bank = live_bank
-    
+    current_bank = initial_wealth - current_df['cost'].sum() if is_sim else live_bank
     dynamic_wealth = current_sell_value + current_bank
 
     tab1, tab2 = st.tabs(["🚀 Transfer Optimizer", "📋 My Squad & Prices"])
 
     with tab1:
-        total_team_xp = current_df['xp'].sum()
-        avg_team_fdr = current_df['avg_fdr'].mean()
-        
-        if total_team_xp < 45 or avg_team_fdr > 3.7:
-             st.info("🔔 **Chip Recommendation Available:** Check Tab 2 for strategy advice.")
-
         st.subheader("💰 Dynamic Financial Summary")
-        m_wealth, m_live, m_sim = st.columns(3)
-        m_wealth.metric("Dynamic Wealth", f"£{dynamic_wealth:.1f}m")
-        m_live.metric("Live Bank (FPL)", f"£{live_bank:.2f}m")
-        m_sim.metric("Remaining Bank (Sim)", f"£{current_bank:.2f}m", 
-                     delta=round(current_bank - live_bank, 2) if is_sim else None)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Dynamic Wealth", f"£{dynamic_wealth:.1f}m")
+        m2.metric("Live Bank", f"£{live_bank:.2f}m")
+        m3.metric("Sim Bank", f"£{current_bank:.2f}m", delta=round(current_bank - live_bank, 2) if is_sim else None)
         
         st.divider()
-        c1, c2 = st.columns(2)
-        with c1:
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
             if st.button("🚀 Optimize Wildcard"):
                 sq, cap, vc = run_optimizer(players, owned_ids, initial_wealth - buffer, True, allow_hit, 15)
                 st.session_state.squad_ids = sq['id'].tolist()
                 st.rerun()
-        with c2:
+        with col_btn2:
             if st.button("🔄 Suggest Transfer Strategy"):
                 sq, cap, vc = run_optimizer(players, owned_ids, initial_wealth - buffer, False, allow_hit, ft_available)
                 st.session_state.squad_ids = sq['id'].tolist()
@@ -268,75 +249,41 @@ if players is not None:
 
     if is_sim:
         is_wildcard = (len(set(st.session_state.squad_ids) - set(owned_ids)) > ft_available + 1)
-        res_sq, cap, vc = run_optimizer(players, owned_ids, initial_wealth - buffer, 
-                                        is_wc=is_wildcard, 
-                                        allow_hit=allow_hit,
-                                        ft_available=ft_available)
+        res_sq, cap, vc = run_optimizer(players, owned_ids, initial_wealth - buffer, is_wildcard, allow_hit, ft_available)
+        
         with tab1:
+            # --- RISK WARNING BANNER ---
+            starting_doubtful = res_sq[(res_sq['Status_Icon'] == "⚽ START") & (res_sq['status'] == "d")]
+            if len(starting_doubtful) >= 2:
+                st.warning(f"⚠️ **High Risk Alert:** Your optimized starting lineup contains **{len(starting_doubtful)}** doubtful players. Note: XP for doubtful players has been auto-reduced by 25%.")
+            
             st.subheader("🔁 Recommended Moves")
-            old_set = set(owned_ids)
-            new_set = set(res_sq['id'].tolist())
+            old_set, new_set = set(owned_ids), set(res_sq['id'].tolist())
+            out_p, in_p = players[players['id'].isin(old_set - new_set)], players[players['id'].isin(new_set - old_set)]
             
-            out_players = players[players['id'].isin(old_set - new_set)]
-            in_players = players[players['id'].isin(new_set - old_set)]
-            
-            if not in_players.empty:
-                col_out, col_in = st.columns(2)
-                with col_out:
-                    for _, p in out_players.iterrows():
-                        st.error(f"OUT: {p['web_name']} ({p['team_name']})")
-                with col_in:
-                    for _, p in in_players.iterrows():
-                        st.success(f"IN: {p['web_name']} ({p['team_name']})")
-                
-                current_top_11_xp = players[players['id'].isin(owned_ids)].nlargest(11, 'xp')['xp'].sum()
-                new_top_11_xp = res_sq[res_sq['Status'].str.contains("⚽|👑")]['xp'].sum()
-                net_gain = new_top_11_xp - current_top_11_xp
-                
-                if net_gain < min_gain_threshold and not is_wildcard:
-                    st.warning(f"⚠️ **Marginal Gain:** Move adds +{net_gain:.2f} XP. Threshold is {min_gain_threshold}. Consider banking!")
-                else:
-                    st.info(f"✨ **Strategy Value:** Move improves Starting 11 by +{max(0, net_gain):.2f} XP.")
-            else:
-                st.info("✅ Your current squad is mathematically optimal. No transfers needed!")
+            c_out, c_in = st.columns(2)
+            for _, p in out_p.iterrows(): c_out.error(f"OUT: {p['web_name']}")
+            for _, p in in_p.iterrows(): 
+                status_note = " ⚠️" if p['status'] == "d" else ""
+                c_in.success(f"IN: {p['web_name']}{status_note}")
             
             st.divider()
-            st.success(f"Projected Score: {res_sq[res_sq['Status'] == '⚽ START']['xp'].sum():.1f} | Captain: {cap}")
-            res_sq.loc[res_sq['web_name'] == cap, 'Status'] = "👑 CAPTAIN"
-            res_sq.loc[res_sq['web_name'] == vc, 'Status'] = "🥈 VICE-CAP"
-            st.table(res_sq[['Status', 'pos_name', 'team_name', 'web_name', 'xp']])
+            res_sq.loc[res_sq['web_name'] == cap, 'Status_Icon'] = "👑 CAPTAIN"
+            res_sq.loc[res_sq['web_name'] == vc, 'Status_Icon'] = "🥈 VICE-CAP"
+            
+            # Show XP adjusted for status in table
+            st.table(res_sq[['Status_Icon', 'pos_name', 'team_name', 'web_name', 'xp', 'status']])
 
     with tab2:
-        st.subheader("🃏 Chip Strategy Advisor")
-        c_chips = st.columns(4)
-        chip_names = {"wildcard": "Wildcard", "freehit": "Free Hit", "3xc": "Triple Captain", "bboost": "Bench Boost"}
-        for i, (internal_name, display_name) in enumerate(chip_names.items()):
-            is_used = internal_name in used_chips
-            status = "❌ Used" if is_used else "✅ Available"
-            c_chips[i].metric(display_name, status)
-
-        st.divider()
-        st.subheader("💡 Strategic Advice")
-        if avg_team_fdr > 3.8 and 'freehit' not in used_chips:
-            st.error("🃏 **Free Hit Advice:** Your squad faces very difficult fixtures. Consider a Free Hit.")
-        
-        st.divider()
         if is_sim:
-            st.warning("⚠️ Showing Simulated Squad")
             if st.button("↩️ Reset to My Real Squad"):
                 st.session_state.squad_ids = owned_ids
                 st.rerun()
-        else: st.success("✅ Showing Your Current Squad")
-
-        df_view = players[players['id'].isin(st.session_state.squad_ids)].copy()
-        st.dataframe(df_view[['web_name','team_name','pos_name','purchase_price','current_price','selling_price','xp','avg_fdr']]
-                     .style.background_gradient(subset=['avg_fdr'], cmap='RdYlGn_r')
-                     .format({'xp':'{:.2f}', 'selling_price':'£{:.1f}m', 'current_price':'£{:.1f}m', 'purchase_price':'£{:.1f}m'}), use_container_width=True)
         
-        st.divider()
-        m_val, m_rem = st.columns(2)
-        m_val.metric("Squad Sell Value", f"£{current_sell_value:.1f}m")
-        m_rem.metric("Remaining Bank", f"£{current_bank:.2f}m")
+        df_view = players[players['id'].isin(st.session_state.squad_ids)].copy()
+        st.dataframe(df_view[['web_name','team_name','pos_name','purchase_price','current_price','selling_price','xp','minutes','status']]
+                     .style.background_gradient(subset=['xp'], cmap='RdYlGn')
+                     .format({'xp':'{:.2f}', 'selling_price':'£{:.1f}m', 'current_price':'£{:.1f}m', 'purchase_price':'£{:.1f}m'}), use_container_width=True)
 
 else:
     st.warning("Please enter your Team ID in the sidebar to begin.")
