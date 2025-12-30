@@ -152,8 +152,15 @@ def get_fpl_data(t_id, gw, horizon):
         players["avg_fdr"] = players["team"].apply(lambda x: get_fdr(x, gw, horizon))
         players["base_xp"] = pd.to_numeric(players["ep_next"], errors="coerce").fillna(0)
         
+        # --- FIXED: POSITION-AWARE XP CALIBRATION ---
         def calibrate_xp(row):
-            fdr_mod = (1 + (3 - row["avg_fdr"]) * 0.1 * fdr_weight)
+            # Defenders/Keepers (Type 1 & 2) penalized more heavily for high FDR
+            if row["element_type"] in [1, 2]:
+                pos_sensitivity = 1.5
+            else: # Midfielders/Forwards (Type 3 & 4) penalized less
+                pos_sensitivity = 0.7
+                
+            fdr_mod = (1 + (3 - row["avg_fdr"]) * 0.1 * fdr_weight * pos_sensitivity)
             dgw_mod = 1.0 if row["gw_fixtures"] <= 1 else 1.2 
             return row["base_xp"] * fdr_mod * dgw_mod
 
@@ -343,7 +350,6 @@ if players is not None:
                      .style.background_gradient(subset=['avg_fdr'], cmap='RdYlGn_r')
                      .format({'xp':'{:.2f}', 'selling_price':'£{:.1f}m', 'current_price':'£{:.1f}m', 'purchase_price':'£{:.1f}m'}), use_container_width=True)
         
-        # --- RESTORED FINANCIAL METRICS ---
         st.divider()
         m_val, m_rem = st.columns(2)
         m_val.metric("Squad Sell Value", f"£{current_sell_value:.1f}m")
