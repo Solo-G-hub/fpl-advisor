@@ -171,7 +171,8 @@ def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available):
     bench_score = pulp.lpSum([players.loc[i, 'xp'] * (s[i] - lineup[i]) for i in players.index]) * 0.15
     
     loyalty = 0.0 if is_wc else 0.5
-    loyalty_score = pulp.lpSum([loyalty for i in players.index if players.loc[i, 'id'] in owned_ids and s[i] == 1])
+    # FIX: Corrected loyalty logic to use s[i] as a decision variable coefficient
+    loyalty_score = pulp.lpSum([loyalty * s[i] for i in players.index if players.loc[i, 'id'] in owned_ids])
     
     prob += starters_score + bench_score + loyalty_score
     prob += pulp.lpSum([s[i] for i in players.index]) == 15
