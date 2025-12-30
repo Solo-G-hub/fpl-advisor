@@ -3,3 +3,4 @@ pandas
 pulp
 requests
 matplotlib
+st-gsheets-connection
