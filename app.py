@@ -12,6 +12,15 @@ st.title("⚽ FPL Tactical Advisor: Second Half Pro")
 # --- GOOGLE SHEETS CONNECTION ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
+# --- AUTO-GAMEWEEK INITIALIZATION ---
+try:
+    static_init = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/").json()
+    events_init = pd.DataFrame(static_init["events"])
+    # Find the gameweek marked as 'is_next'
+    next_gw_auto = int(events_init[events_init["is_next"] == True].iloc[0]["id"]) if not events_init[events_init["is_next"] == True].empty else 38
+except:
+    next_gw_auto = 19
+
 def sync_prices_to_sheets(team_id, current_gw):
     """Fetches live team and overwrites the Google Sheet."""
     base_url = "https://fantasy.premierleague.com/api/"
@@ -19,7 +28,11 @@ def sync_prices_to_sheets(team_id, current_gw):
         static = requests.get(f"{base_url}bootstrap-static/").json()
         players_lookup = pd.DataFrame(static["elements"])[['id', 'web_name']]
         
+        # We sync based on the CURRENT or PREVIOUS week (whenever picks are actually available)
         r = requests.get(f"{base_url}entry/{team_id}/event/{current_gw}/picks/")
+        if r.status_code != 200:
+             r = requests.get(f"{base_url}entry/{team_id}/event/{current_gw-1}/picks/")
+
         if r.status_code == 200:
             picks = r.json()['picks']
             new_data = pd.DataFrame([
@@ -27,13 +40,9 @@ def sync_prices_to_sheets(team_id, current_gw):
                  "purchase_price": p['purchase_price'] / 10} 
                 for p in picks
             ])
-            # Overwrites the 'Prices' worksheet with your new Wildcard squad
             conn.update(worksheet="Prices", data=new_data)
             st.success("✅ Google Sheet updated! Refreshing...")
-            
-            # --- ADJUSTMENT: CLEAR CACHE SO FRESH DATA IS READ IMMEDIATELY ---
             st.cache_data.clear()
-            
             st.rerun()
         else:
             st.error("❌ Sync failed. (Note: New teams only appear after the GW deadline)")
@@ -44,7 +53,8 @@ def sync_prices_to_sheets(team_id, current_gw):
 with st.sidebar:
     st.header("⚙️ Configuration")
     team_id = st.number_input("Enter FPL Team ID", value=5816864, step=1)
-    current_gw = st.number_input("Current Gameweek", value=19, step=1)
+    # Automatically defaults to the next gameweek
+    current_gw = st.number_input("Target Gameweek", value=next_gw_auto, step=1)
     
     buffer = st.number_input("Safety Buffer (m)", min_value=0.0, max_value=2.0, value=0.2, step=0.1)
     
@@ -74,8 +84,10 @@ def get_fpl_data(t_id, gw, horizon):
         events = pd.DataFrame(static["events"])
         fixtures = pd.DataFrame(requests.get(f"{base_url}fixtures/").json())
         players["team_name"] = players["team"].map(teams)
-        current_gw_api = int(events[events["is_current"]].iloc[0]["id"])
-        gw_fetch = min(int(gw), current_gw_api)
+        
+        # Logic: Fetch picks from the LAST gameweek that has passed (or is current)
+        current_gw_api = int(events[events["is_current"]].iloc[0]["id"]) if not events[events["is_current"]].empty else gw
+        gw_fetch = min(int(gw)-1, current_gw_api)
 
         history = requests.get(f"{base_url}entry/{t_id}/history/").json()
         used_chips = [c['name'] for c in history.get('chips', [])]
@@ -83,7 +95,8 @@ def get_fpl_data(t_id, gw, horizon):
         r_picks = requests.get(f"{base_url}entry/{t_id}/event/{gw_fetch}/picks/")
         picks_data = r_picks.json() if r_picks.status_code == 200 else None
         
-        if not picks_data: raise ValueError("Invalid team ID")
+        if not picks_data: raise ValueError("Invalid team ID or data not yet available for this GW")
+        
         if picks_data.get("active_chip") == "freehit":
             r_prev = requests.get(f"{base_url}entry/{t_id}/event/{gw_fetch - 1}/picks/")
             picks_data = r_prev.json()
@@ -91,7 +104,6 @@ def get_fpl_data(t_id, gw, horizon):
         owned_ids = [p['element'] for p in picks_data["picks"]]
         bank = picks_data["entry_history"]["bank"] / 10
 
-        # --- UPDATED: READ FROM GOOGLE SHEETS ---
         try:
             df_gsheet = conn.read(worksheet="Prices", ttl=0)
             players["web_name_clean"] = players["web_name"].str.strip().str.lower()
