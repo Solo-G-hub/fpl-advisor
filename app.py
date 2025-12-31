@@ -403,7 +403,22 @@ if players is not None:
             c_chips[i].metric(display_name, status)
 
         st.divider()
-        st.subheader("💡 Second Half Tactical Radar")
+        st.subheader("💡 2025/26 Strategic Road Map")
+        
+        # Strategy logic for the 25/26 Second Half
+        if current_gw < 28:
+            st.info("📅 **Current Phase:** Focus on banking Free Transfers. Save your chips for the chaos starting in GW31.")
+        elif 28 <= current_gw <= 30:
+            st.success("🃏 **Wildcard Window:** Ideal time to Wildcard. Build a squad for the GW33 Doubles and GW31/34 Blanks.")
+        elif current_gw == 31:
+            st.error("🚨 **Blank GW31 (Carabao Final):** Massive blank week. Use your **Free Hit** now to field 11 players.")
+        elif current_gw == 33:
+            st.warning("🚀 **Double GW33:** High potential for **Bench Boost** or **Triple Captain**!")
+        elif current_gw == 34:
+            st.error("🚨 **Blank GW34 (FA Cup Semis):** Another 'Blank' week. Use your second **Free Hit** here if your squad is thin.")
+
+        st.divider()
+        st.subheader("💡 Current Squad Radar")
         
         dgw_players = current_df[current_df['gw_fixtures'] >= 2]
         if not dgw_players.empty and 'bboost' not in used_chips:
@@ -423,7 +438,8 @@ if players is not None:
             if st.button("↩️ Reset to My Real Squad"):
                 st.session_state.squad_ids = owned_ids
                 st.rerun()
-        else: st.success("✅ Showing Your Current Squad")
+        else: 
+            st.success("✅ Showing Your Current Squad")
 
         df_view = players[players['id'].isin(st.session_state.squad_ids)].copy()
         st.dataframe(df_view[['web_name','team_name','pos_name','purchase_price','current_price','selling_price','xp','gw_fixtures','avg_fdr']]
@@ -437,6 +453,7 @@ if players is not None:
 
 else:
     st.warning("Please enter your Team ID in the sidebar to begin.")
+
 
 
 
