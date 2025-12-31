@@ -297,6 +297,7 @@ if players is not None:
     if 'squad_ids' not in st.session_state:
         st.session_state.squad_ids = owned_ids
 
+    # Calculate the total value of your team if you sold everyone + your cash
     real_sell_value = players.loc[players['id'].isin(owned_ids), 'selling_price'].sum()
     initial_wealth = real_sell_value + live_bank
 
@@ -304,9 +305,18 @@ if players is not None:
     is_sim = st.session_state.squad_ids != owned_ids
     
     current_sell_value = current_df['selling_price'].sum()
+    
     if is_sim:
-        current_cost = current_df['cost'].sum()
-        current_bank = initial_wealth - current_cost
+        # NEW LOGIC: If a player is already owned, we only 'charge' the selling price.
+        # If they are a new buy, we charge the full market price.
+        total_team_cost = 0
+        for _, p in current_df.iterrows():
+            if p['id'] in owned_ids:
+                total_team_cost += p['selling_price']
+            else:
+                total_team_cost += p['current_price']
+        
+        current_bank = initial_wealth - total_team_cost
     else:
         current_bank = live_bank
     
@@ -376,7 +386,7 @@ if players is not None:
                 st.info("✅ Your current squad is mathematically optimal. No transfers needed!")
             
             st.divider()
-            st.success(f"Total Horizon XP: {res_sq[res_sq['Status'].str.contains('⚽|👑')]['xp'].sum():.1f} | Captain: {cap}")
+            st.success(f"Total Horizon XP: {res_sq[res_sq['Status'].str.contains('⚽|👑|🥈')]['xp'].sum():.1f} | 👑 Captain: {cap} | 🥈 Vice: {vc}")
             st.table(res_sq[['Status', 'pos_name', 'team_name', 'web_name', 'xp']])
 
     with tab2:
@@ -423,5 +433,6 @@ if players is not None:
 
 else:
     st.warning("Please enter your Team ID in the sidebar to begin.")
+
 
 
