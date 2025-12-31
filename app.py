@@ -374,14 +374,18 @@ if players is not None:
                     for _, p in in_players.iterrows():
                         st.success(f"IN: {p['web_name']} ({p['team_name']})")
                 
-                current_top_11_xp = players[players['id'].isin(owned_ids)].nlargest(11, 'xp')['xp'].sum()
-                new_top_11_xp = res_sq[res_sq['Status'].str.contains("⚽|👑")]['xp'].sum()
-                net_gain = new_top_11_xp - current_top_11_xp
+                # --- FIXED GAIN CALCULATION ---
+                # Calculate the total XP of the 15 players you CURRENTLY own
+                current_total_xp = players[players['id'].isin(owned_ids)]['xp'].sum()
+                # Calculate the total XP of the 15 players in the SUGGESTED squad
+                new_total_xp = res_sq['xp'].sum()
+                
+                net_gain = new_total_xp - current_total_xp
                 
                 if net_gain < min_gain_threshold and not is_wildcard:
-                    st.warning(f"⚠️ **Marginal Gain:** Move adds +{net_gain:.2f} Horizon XP. Threshold is {min_gain_threshold}. Consider banking!")
+                    st.warning(f"⚠️ **Marginal Gain:** Move adds +{net_gain:.2f} Total Horizon XP. Threshold is {min_gain_threshold}. Consider banking!")
                 else:
-                    st.info(f"✨ **Strategy Value:** Move improves Starting 11 by +{max(0, net_gain):.2f} Total Horizon XP.")
+                    st.info(f"✨ **Strategy Value:** Move improves squad by +{net_gain:.2f} Total Horizon XP.")
             else:
                 st.info("✅ Your current squad is mathematically optimal. No transfers needed!")
             
@@ -433,6 +437,7 @@ if players is not None:
 
 else:
     st.warning("Please enter your Team ID in the sidebar to begin.")
+
 
 
 
