@@ -389,12 +389,18 @@ if players is not None:
             else:
                 st.info("✅ Your current squad is mathematically optimal. No transfers needed!")
             
+            # --- REPLACE THIS SECTION ---
             st.divider()
+            
+            # 1. Calculate weighted XP
             starters_xp = res_sq[res_sq['Status'].str.contains('⚽|👑|🥈')]['xp'].sum()
-bench_xp = res_sq[res_sq['Status'] == "🪑 BENCH"]['xp'].sum()
-weighted_total = starters_xp + (bench_xp * 0.15)
-
-st.success(f"Total Horizon XP: {weighted_total:.1f} (Starters: {starters_xp:.1f} + Bench Value) | 👑 Captain: {cap} | 🥈 Vice: {vc}")
+            bench_xp = res_sq[res_sq['Status'] == "🪑 BENCH"]['xp'].sum()
+            weighted_total = starters_xp + (bench_xp * 0.15)
+            
+            # 2. Display the new weighted total
+            st.success(f"Total Horizon XP: {weighted_total:.1f} (Starters: {starters_xp:.1f} + Bench Value) | 👑 Captain: {cap} | 🥈 Vice: {vc}")
+            
+            # 3. Display the table
             st.table(res_sq[['Status', 'pos_name', 'team_name', 'web_name', 'xp']])
 
     with tab2:
@@ -457,10 +463,3 @@ st.success(f"Total Horizon XP: {weighted_total:.1f} (Starters: {starters_xp:.1f}
 
 else:
     st.warning("Please enter your Team ID in the sidebar to begin.")
-
-
-
-
-
-
-
