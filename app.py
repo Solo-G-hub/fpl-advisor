@@ -383,9 +383,9 @@ if players is not None:
                 net_gain = new_total_xp - current_total_xp
                 
                 if net_gain < min_gain_threshold and not is_wildcard:
-                    st.warning(f"⚠️ **Marginal Gain:** Move adds +{net_gain:.2f} Total Horizon XP. Threshold is {min_gain_threshold}. Consider banking!")
+                    st.warning(f"⚠️ **Marginal Gain:** Move adds {net_gain:.2f} Total Horizon XP. Threshold is {min_gain_threshold}. Consider banking!")
                 else:
-                    st.info(f"✨ **Strategy Value:** Move improves squad by +{net_gain:.2f} Total Horizon XP.")
+                    st.info(f"✨ **Strategy Value:** Move improves squad by {net_gain:.2f} Total Horizon XP.")
             else:
                 st.info("✅ Your current squad is mathematically optimal. No transfers needed!")
             
@@ -437,6 +437,7 @@ if players is not None:
 
 else:
     st.warning("Please enter your Team ID in the sidebar to begin.")
+
 
 
 
