@@ -180,7 +180,7 @@ def get_fpl_data(t_id, gw, horizon, att_decay, def_decay):
         players["xp"] = players.apply(calibrate_horizon_xp, axis=1)
         players["pos_name"] = players["element_type"].map({1:"GKP",2:"DEF",3:"MID",4:"FWD"})
         
-        return players, owned_ids, bank, used_chips
+        return players[players["status"].isin(["a","d"])], owned_ids, bank, used_chips
     except Exception as e:
         st.error(f"FPL Error: {e}")
         return None, [], 0.0, []
@@ -463,4 +463,3 @@ if players is not None:
 
 else:
     st.warning("Please enter your Team ID in the sidebar to begin.")
-
