@@ -265,8 +265,17 @@ def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available):
     
     # --- RESULT PARSING ---
     res = players.loc[[i for i in players.index if s[i].varValue == 1]].copy()
-    cap_id = [i for i in players.index if captain[i].varValue == 1][0]
-    cap_name = players.loc[cap_id, 'web_name']
+# Find Captain and Vice Captain with safety checks
+    cap_list = [i for i in players.index if captain[i] is not None and captain[i].varValue == 1]
+    vc_list = [i for i in players.index if vice_captain[i] is not None and vice_captain[i].varValue == 1]
+
+    if not cap_list:
+        import streamlit as st
+        st.error("🚨 Optimizer Infeasible: The solver couldn't find a valid team. Try lowering your 'Buffer' or allowing more transfers/hits.")
+        st.stop()
+
+    cap_id = cap_list[0]
+    vc_id = vc_list[0] if vc_list else cap_id # Fallback if VC fails
     
     starters_ids = [i for i in players.index if lineup[i].varValue == 1]
     # Find the best XP player among starters who is NOT the captain
@@ -463,3 +472,4 @@ if players is not None:
 
 else:
     st.warning("Please enter your Team ID in the sidebar to begin.")
+
