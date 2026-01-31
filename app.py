@@ -180,8 +180,7 @@ def get_fpl_data(t_id, gw, horizon, att_decay, def_decay):
         players["xp"] = players.apply(calibrate_horizon_xp, axis=1)
         players["pos_name"] = players["element_type"].map({1:"GKP",2:"DEF",3:"MID",4:"FWD"})
         
-# We removed the filter so the optimizer knows your injured players exist!
-return players, owned_ids, bank, used_chips
+        return players, owned_ids, bank, used_chips
     except Exception as e:
         st.error(f"FPL Error: {e}")
         return None, [], 0.0, []
@@ -264,39 +263,24 @@ def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available):
 
     prob.solve(pulp.PULP_CBC_CMD(msg=0))
     
-# --- RESULT PARSING ---
-    # 1. Check if the solver actually found a solution
-    if pulp.LpStatus[prob.status] != 'Optimal':
-        import streamlit as st
-        st.error(f"🚨 Optimizer Infeasible ({pulp.LpStatus[prob.status]}): The solver couldn't find a valid team. Try lowering your 'Buffer' or allowing more transfers/hits.")
-        st.stop()
-
-    # 2. Extract the chosen squad
+    # --- RESULT PARSING ---
     res = players.loc[[i for i in players.index if s[i].varValue == 1]].copy()
-    
-    # 3. Find Captain
-    cap_list = [i for i in players.index if captain[i].varValue == 1]
-    cap_id = cap_list[0]
+    cap_id = [i for i in players.index if captain[i].varValue == 1][0]
     cap_name = players.loc[cap_id, 'web_name']
     
-    # 4. Find Vice Captain (Highest XP starter who is NOT the captain)
     starters_ids = [i for i in players.index if lineup[i].varValue == 1]
+    # Find the best XP player among starters who is NOT the captain
     vc_options = res[res.index.isin(starters_ids) & (res.index != cap_id)]
+    vc_row = vc_options.sort_values(by='xp', ascending=False).iloc[0]
+    vc_id = vc_row.name
+    vc_name = vc_row['web_name']
     
-    if not vc_options.empty:
-        vc_row = vc_options.sort_values(by='xp', ascending=False).iloc[0]
-        vc_id = vc_row.name
-        vc_name = vc_row['web_name']
-    else:
-        vc_id = cap_id
-        vc_name = cap_name
-
-    # 5. Define Statuses for display
+    # Define Statuses
     res['Status'] = ["⚽ START" if lineup[i].varValue == 1 else "🪑 BENCH" for i in res.index]
     res.loc[cap_id, 'Status'] = "👑 CAPTAIN"
-    res.loc[vc_id, 'Status'] = "🥈 VICE-CAP"
+    res.loc[vc_id, 'Status'] = "🥈 VICE-CAP"  # Add Vice Captain label
     
-    # 6. Sort for display: Captain first, then Vice, then Starters, then Bench
+    # Sort for display: Captain first, then Vice, then Starters, then Bench
     res['sort_rank'] = 0
     res.loc[res['Status'] == "👑 CAPTAIN", 'sort_rank'] = -1
     res.loc[res['Status'] == "🥈 VICE-CAP", 'sort_rank'] = -0.5
@@ -479,6 +463,3 @@ if players is not None:
 
 else:
     st.warning("Please enter your Team ID in the sidebar to begin.")
-
-
-
