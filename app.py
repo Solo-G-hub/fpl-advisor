@@ -397,11 +397,11 @@ def run_optimizer(players, owned_ids, budget, is_wc, allow_hit, ft_available,
     res.loc[cap_id, 'Status'] = "👑 CAPTAIN"
     res.loc[vc_id, 'Status'] = "🥈 VICE-CAP"
 
-    res['sort_rank'] = 0
-    res.loc[res['Status'] == "👑 CAPTAIN", 'sort_rank'] = -1
+    res['sort_rank'] = 0.0
+    res.loc[res['Status'] == "👑 CAPTAIN", 'sort_rank'] = -1.0
     res.loc[res['Status'] == "🥈 VICE-CAP", 'sort_rank'] = -0.5
-    res.loc[(res['Status'] == "🪑 BENCH") & (res['element_type'] == 1), 'sort_rank'] = 1
-    res.loc[(res['Status'] == "🪑 BENCH") & (res['element_type'] != 1), 'sort_rank'] = 2
+    res.loc[(res['Status'] == "🪑 BENCH") & (res['element_type'] == 1), 'sort_rank'] = 1.0
+    res.loc[(res['Status'] == "🪑 BENCH") & (res['element_type'] != 1), 'sort_rank'] = 2.0
     res = res.sort_values(by=['sort_rank', 'xp'], ascending=[True, False])
 
     return res, cap_name, vc_name
