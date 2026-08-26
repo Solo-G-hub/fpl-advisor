@@ -151,7 +151,7 @@ def get_price_change_alerts(players):
 # --- SIDEBAR SETTINGS ---
 with st.sidebar:
     st.header("⚙️ Configuration")
-    team_id = st.number_input("Enter FPL Team ID", value=5816864, step=1)
+    team_id = st.number_input("Enter FPL Team ID", value=5230370, step=1)
     current_gw = st.number_input("Target Gameweek", value=next_gw_auto, step=1)
     buffer = st.number_input("Safety Buffer (m)", min_value=0.0, max_value=2.0, value=0.2, step=0.1)
 
